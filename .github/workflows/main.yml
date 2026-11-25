@@ -1,0 +1,43 @@
+name: Build WeatherRU Plugin
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - arch: x64
+            cmake_arch: x64
+          - arch: x86
+            cmake_arch: Win32
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Sync official TrafficMonitor PluginInterface.h
+        shell: pwsh
+        run: |
+          try {
+            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/zhongyang219/TrafficMonitor/master/TrafficMonitor/PluginInterface.h" -OutFile "include/PluginInterface.h" -UseBasicParsing
+            Write-Host "Downloaded official PluginInterface.h"
+          } catch {
+            Write-Host "Using bundled fallback PluginInterface.h"
+          }
+
+      - name: Configure CMake (${{ matrix.arch }})
+        run: cmake -B build -A ${{ matrix.cmake_arch }}
+
+      - name: Build Release (${{ matrix.arch }})
+        run: cmake --build build --config Release
+
+      - name: Upload WeatherRU.dll (${{ matrix.arch }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeatherRU-${{ matrix.arch }}
+          path: build/Release/WeatherRU.dll
