@@ -24,7 +24,6 @@ const wchar_t* CWeatherRUItem::GetItemId() const
 
 const wchar_t* CWeatherRUItem::GetItemLableText() const
 {
-    // Пустая подпись, чтобы рядом с иконкой облака отображалась только температура
     return L"";
 }
 
@@ -73,7 +72,7 @@ static INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARA
         SetWindowTextW(hCity, state->cfg.city_name.c_str());
 
         HWND hInt = GetDlgItem(hDlg, IDC_COMBO_INTERVAL);
-        int selected_idx = 1; // 15 min default
+        int selected_idx = 1;
         for (int i = 0; i < 4; ++i)
         {
             std::wstring label = std::to_wstring(kIntervals[i]) + L" мин";
@@ -230,8 +229,9 @@ void CWeatherRUPlugin::StopWorker()
         m_stop = true;
     }
     m_cv.notify_all();
+    // Не вызываем join() при выгрузке DLL, чтобы исключить Loader Lock deadlock
     if (m_worker.joinable())
-        m_worker.join();
+        m_worker.detach();
     m_worker_started = false;
 }
 
@@ -246,51 +246,57 @@ void CWeatherRUPlugin::TriggerImmediateRefresh()
 
 void CWeatherRUPlugin::WorkerLoop()
 {
-    while (true)
+    try
     {
-        PluginConfig cfg_snapshot;
+        while (true)
         {
-            std::unique_lock<std::mutex> lock(m_mutex);
-            if (m_stop) break;
-
-            if (!m_force_refresh)
+            PluginConfig cfg_snapshot;
             {
-                m_cv.wait_until(lock, m_next_fetch_time, [this]() {
-                    return m_stop || m_force_refresh;
-                });
+                std::unique_lock<std::mutex> lock(m_mutex);
                 if (m_stop) break;
+
+                if (!m_force_refresh)
+                {
+                    m_cv.wait_until(lock, m_next_fetch_time, [this]() {
+                        return m_stop || m_force_refresh;
+                    });
+                    if (m_stop) break;
+                }
+                m_force_refresh = false;
+                cfg_snapshot = m_config;
             }
-            m_force_refresh = false;
-            cfg_snapshot = m_config;
-        }
 
-        // Network call happens OUTSIDE the lock so UI never blocks
-        auto res = WeatherClient::FetchCurrentTemperature(cfg_snapshot.lat, cfg_snapshot.lon);
+            auto res = WeatherClient::FetchCurrentTemperature(cfg_snapshot.lat, cfg_snapshot.lon);
 
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (res.ok)
             {
-                m_has_temp = true;
-                m_last_temp = res.temperature_c;
-                m_last_error.clear();
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_stop) break;
 
-                SYSTEMTIME st{};
-                GetLocalTime(&st);
-                wchar_t time_buf[32];
-                std::swprintf(time_buf, 32, L"%02d:%02d", st.wHour, st.wMinute);
-                m_last_update_str = time_buf;
+                if (res.ok)
+                {
+                    m_has_temp = true;
+                    m_last_temp = res.temperature_c;
+                    m_last_error.clear();
 
-                int interval = (std::max)(5, m_config.update_interval_min);
-                m_next_fetch_time = std::chrono::steady_clock::now() + std::chrono::minutes(interval);
-            }
-            else
-            {
-                m_last_error = res.error;
-                // Retry in 2 minutes on network error (no spamming every second)
-                m_next_fetch_time = std::chrono::steady_clock::now() + std::chrono::minutes(2);
+                    SYSTEMTIME st{};
+                    GetLocalTime(&st);
+                    wchar_t time_buf[32];
+                    std::swprintf(time_buf, 32, L"%02d:%02d", st.wHour, st.wMinute);
+                    m_last_update_str = time_buf;
+
+                    int interval = (std::max)(5, m_config.update_interval_min);
+                    m_next_fetch_time = std::chrono::steady_clock::now() + std::chrono::minutes(interval);
+                }
+                else
+                {
+                    m_last_error = res.error;
+                    m_next_fetch_time = std::chrono::steady_clock::now() + std::chrono::minutes(2);
+                }
             }
         }
+    }
+    catch (...)
+    {
     }
 }
 
@@ -319,19 +325,23 @@ std::wstring CWeatherRUPlugin::FormatTemperature(double temp_c, bool show_plus, 
 
 void CWeatherRUPlugin::DataRequired()
 {
-    // Вызывается TrafficMonitor примерно раз в секунду.
-    // Сетевые запросы здесь НЕ выполняются — только чтение кэша из памяти.
-    StartWorkerIfNeeded();
-
-    std::wstring display;
+    try
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (m_has_temp)
-            display = FormatTemperature(m_last_temp, m_config.show_plus, m_config.round_temp);
-        else
-            display = L"-- °C";
+        StartWorkerIfNeeded();
+
+        std::wstring display;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if (m_has_temp)
+                display = FormatTemperature(m_last_temp, m_config.show_plus, m_config.round_temp);
+            else
+                display = L"-- °C";
+        }
+        m_item.SetValueText(display);
     }
-    m_item.SetValueText(display);
+    catch (...)
+    {
+    }
 }
 
 ITMPlugin::OptionReturn CWeatherRUPlugin::ShowOptionsDialog(void* hParent)
@@ -391,7 +401,7 @@ const wchar_t* CWeatherRUPlugin::GetInfo(PluginInfoIndex index)
     case TMI_DESCRIPTION: return L"Отображает актуальную температуру для городов России через Open-Meteo (без API-ключа).";
     case TMI_AUTHOR:      return L"Custom Plugin";
     case TMI_COPYRIGHT:   return L"MIT License";
-    case TMI_VERSION:     return L"1.0.0";
+    case TMI_VERSION:     return L"1.0.1";
     case TMI_URL:         return L"https://open-meteo.com/";
     default:              return L"";
     }
@@ -399,11 +409,16 @@ const wchar_t* CWeatherRUPlugin::GetInfo(PluginInfoIndex index)
 
 void CWeatherRUPlugin::OnExtenedInfo(ExtendedInfoIndex index, const wchar_t* data)
 {
-    if (index == EI_CONFIG_DIR && data != nullptr && data[0] != L'\0')
+    try
     {
-        m_config_dir = data;
-        LoadConfig();
-        StartWorkerIfNeeded();
+        if (index == EI_CONFIG_DIR && data != nullptr && data[0] != L'\0')
+        {
+            m_config_dir = data;
+            LoadConfig();
+        }
+    }
+    catch (...)
+    {
     }
 }
 
@@ -485,7 +500,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID)
     if (ul_reason_for_call == DLL_PROCESS_ATTACH)
     {
         CWeatherRUPlugin::SetModuleHandle(hModule);
-        DisableThreadLibraryCalls(hModule);
     }
     return TRUE;
 }
