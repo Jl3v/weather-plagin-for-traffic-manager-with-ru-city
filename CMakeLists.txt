@@ -27,8 +27,7 @@ target_compile_definitions(WeatherRU PRIVATE
 
 if (MSVC)
     target_compile_options(WeatherRU PRIVATE /utf-8 /W3)
-    # Статическая линковка CRT, чтобы DLL не требовала установки VC++ Redistributable
     set_property(TARGET WeatherRU PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 endif()
 
-target_link_libraries(WeatherRU PRIVATE winhttp user32)
+target_link_libraries(WeatherRU PRIVATE winhttp user32 gdi32 gdiplus shell32)
