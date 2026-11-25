@@ -2,9 +2,13 @@
 #include "WeatherClient.h"
 #include "resource.h"
 
+#include <shellapi.h>
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "gdi32.lib")
 
 HMODULE CWeatherRUPlugin::s_hModule = nullptr;
 
@@ -51,6 +55,7 @@ struct DialogState
     CWeatherRUPlugin* plugin = nullptr;
     PluginConfig cfg;
     bool changed = false;
+    HFONT link_font = nullptr;
 };
 
 static const int kIntervals[] = { 10, 15, 30, 60 };
@@ -89,13 +94,53 @@ static INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARA
         CheckDlgButton(hDlg, IDC_CHECK_ROUND_TEMP, state->cfg.round_temp ? BST_CHECKED : BST_UNCHECKED);
 
         SetDlgItemTextW(hDlg, IDC_STATIC_STATUS, state->plugin->GetStatusSummary().c_str());
+
+        // Подчёркнутый шрифт для кликабельной ссылки источника
+        HFONT hFont = reinterpret_cast<HFONT>(SendDlgItemMessageW(hDlg, IDC_STATIC_HINT, WM_GETFONT, 0, 0));
+        if (!hFont) hFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+        LOGFONTW lf{};
+        if (hFont && GetObjectW(hFont, sizeof(LOGFONTW), &lf))
+        {
+            lf.lfUnderline = TRUE;
+            state->link_font = CreateFontIndirectW(&lf);
+            if (state->link_font)
+                SendDlgItemMessageW(hDlg, IDC_STATIC_HINT, WM_SETFONT, reinterpret_cast<WPARAM>(state->link_font), TRUE);
+        }
         return TRUE;
+    }
+
+    case WM_CTLCOLORSTATIC:
+    {
+        if (reinterpret_cast<HWND>(lParam) == GetDlgItem(hDlg, IDC_STATIC_HINT))
+        {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            SetTextColor(hdc, RGB(0, 102, 204));
+            SetBkMode(hdc, TRANSPARENT);
+            return reinterpret_cast<INT_PTR>(GetSysColorBrush(COLOR_BTNFACE));
+        }
+        break;
+    }
+
+    case WM_SETCURSOR:
+    {
+        if (reinterpret_cast<HWND>(wParam) == GetDlgItem(hDlg, IDC_STATIC_HINT))
+        {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            SetWindowLongPtrW(hDlg, DWLP_MSGRESULT, TRUE);
+            return TRUE;
+        }
+        break;
     }
 
     case WM_COMMAND:
     {
         WORD id = LOWORD(wParam);
-        if (id == IDC_BTN_TEST_CITY)
+        if (id == IDC_STATIC_HINT && HIWORD(wParam) == STN_CLICKED)
+        {
+            ShellExecuteW(hDlg, L"open", L"https://open-meteo.com/", nullptr, nullptr, SW_SHOWNORMAL);
+            return TRUE;
+        }
+        else if (id == IDC_BTN_TEST_CITY)
         {
             wchar_t city_buf[256] = {};
             GetDlgItemTextW(hDlg, IDC_COMBO_CITY, city_buf, 255);
@@ -174,6 +219,16 @@ static INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARA
         {
             EndDialog(hDlg, IDCANCEL);
             return TRUE;
+        }
+        break;
+    }
+
+    case WM_DESTROY:
+    {
+        if (state && state->link_font)
+        {
+            DeleteObject(state->link_font);
+            state->link_font = nullptr;
         }
         break;
     }
@@ -412,7 +467,7 @@ const wchar_t* CWeatherRUPlugin::GetInfo(PluginInfoIndex index)
     case TMI_DESCRIPTION: return L"Отображает актуальную температуру для городов России через Open-Meteo (без API-ключа).";
     case TMI_AUTHOR:      return L"Custom Plugin";
     case TMI_COPYRIGHT:   return L"MIT License";
-    case TMI_VERSION:     return L"1.0.2";
+    case TMI_VERSION:     return L"1.0.0";
     case TMI_URL:         return L"https://open-meteo.com/";
     default:              return L"";
     }
