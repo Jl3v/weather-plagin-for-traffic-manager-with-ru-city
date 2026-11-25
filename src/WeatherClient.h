@@ -23,6 +23,8 @@ struct WeatherResult
 {
     bool ok = false;
     double temperature_c = 0.0;
+    int weather_code = 0;
+    bool is_day = true;
     std::wstring error;
 };
 
