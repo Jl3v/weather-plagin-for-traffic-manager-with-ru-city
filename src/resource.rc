@@ -1,0 +1,25 @@
+#pragma code_page(65001)
+#include <windows.h>
+#include "resource.h"
+
+IDD_OPTIONS_DIALOG DIALOGEX 0, 0, 260, 178
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Настройки погоды (РФ)"
+FONT 9, "Segoe UI", 400, 0, 0xCC
+BEGIN
+    LTEXT           "Город (выберите из списка или введите свой):", IDC_STATIC, 12, 10, 236, 10
+    COMBOBOX        IDC_COMBO_CITY, 12, 23, 174, 140, CBS_DROPDOWN | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Проверить", IDC_BTN_TEST_CITY, 192, 22, 56, 14
+
+    LTEXT           "Интервал обновления (защита от частых запросов):", IDC_STATIC, 12, 46, 236, 10
+    COMBOBOX        IDC_COMBO_INTERVAL, 12, 59, 120, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+
+    CONTROL         "Показывать знак «+» для плюсовой температуры (+5 °C)", IDC_CHECK_SHOW_PLUS, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 12, 82, 236, 12
+    CONTROL         "Округлять температуру до целого градуса", IDC_CHECK_ROUND_TEMP, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 12, 98, 236, 12
+
+    LTEXT           "Статус: ожидание...", IDC_STATIC_STATUS, 12, 118, 236, 24
+    LTEXT           "Источник: Open-Meteo (без API-ключа и VPN)", IDC_STATIC_HINT, 12, 144, 236, 10
+
+    DEFPUSHBUTTON   "ОК", IDOK, 142, 158, 50, 14
+    PUSHBUTTON      "Отмена", IDCANCEL, 198, 158, 50, 14
+END
