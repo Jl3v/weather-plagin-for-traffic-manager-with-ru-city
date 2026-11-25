@@ -101,7 +101,7 @@ void CWeatherRUIconItem::SetWeatherState(int wmo_code, bool is_day, bool has_dat
 
 static void DrawSun(Gdiplus::Graphics& g, float cx, float cy, float r, bool with_rays)
 {
-    Gdiplus::Color outlineCol(255, 34, 36, 46);
+    Gdiplus::Color outlineCol(255, 32, 34, 44);
     Gdiplus::Color sunFill(255, 255, 198, 56);
     Gdiplus::Color sunRay(255, 255, 174, 42);
 
@@ -114,67 +114,82 @@ static void DrawSun(Gdiplus::Graphics& g, float cx, float cy, float r, bool with
         {
             float ang = i * 3.14159265f / 4.0f;
             float r1 = r * 1.25f;
-            float r2 = r * 1.68f;
+            float r2 = r * 1.65f;
             g.DrawLine(&rayPen, cx + std::cos(ang) * r1, cy + std::sin(ang) * r1,
                                 cx + std::cos(ang) * r2, cy + std::sin(ang) * r2);
         }
     }
 
-    Gdiplus::SolidBrush brush(sunFill);
-    Gdiplus::Pen pen(outlineCol, max(1.2f, r * 0.18f));
-    g.FillEllipse(&brush, cx - r, cy - r, r * 2.0f, r * 2.0f);
-    g.DrawEllipse(&pen, cx - r, cy - r, r * 2.0f, r * 2.0f);
+    float stroke = max(1.2f, r * 0.18f);
+    Gdiplus::SolidBrush outBrush(outlineCol);
+    Gdiplus::SolidBrush fillBrush(sunFill);
+    g.FillEllipse(&outBrush, cx - r - stroke, cy - r - stroke, (r + stroke) * 2.0f, (r + stroke) * 2.0f);
+    g.FillEllipse(&fillBrush, cx - r, cy - r, r * 2.0f, r * 2.0f);
 }
 
 static void DrawGreyMoon(Gdiplus::Graphics& g, float cx, float cy, float r)
 {
-    Gdiplus::Color moonFill(255, 184, 192, 204);
-    Gdiplus::Color outlineCol(255, 34, 36, 46);
+    Gdiplus::Color moonFill(255, 192, 200, 214);
+    Gdiplus::Color outlineCol(255, 32, 34, 44);
 
-    Gdiplus::GraphicsPath outerPath;
-    outerPath.AddEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f);
+    // Сглаженный полумесяц из двух точных дуг
+    const float deg2rad = 3.14159265f / 180.0f;
+    const float theta = -35.0f;
+    const float alpha = 68.9f;
+    const float d = r * 0.72f;
 
-    Gdiplus::GraphicsPath cutPath;
-    float ox = cx + r * 0.48f;
-    float oy = cy - r * 0.28f;
-    float cr = r * 0.88f;
-    cutPath.AddEllipse(ox - cr, oy - cr, cr * 2.0f, cr * 2.0f);
+    float cx2 = cx + std::cos(theta * deg2rad) * d;
+    float cy2 = cy + std::sin(theta * deg2rad) * d;
 
-    Gdiplus::Region moonReg(&outerPath);
-    moonReg.Exclude(&cutPath);
+    Gdiplus::GraphicsPath path(Gdiplus::FillModeWinding);
+    path.AddArc(cx - r, cy - r, r * 2.0f, r * 2.0f, theta + alpha, 360.0f - 2.0f * alpha);
+    path.AddArc(cx2 - r, cy2 - r, r * 2.0f, r * 2.0f, theta + alpha + 180.0f, -2.0f * alpha);
+    path.CloseFigure();
 
-    Gdiplus::SolidBrush brush(moonFill);
-    g.FillRegion(&brush, &moonReg);
-
-    // Аккуратная обводка внешнего края полумесяца
-    Gdiplus::Pen pen(outlineCol, max(1.1f, r * 0.16f));
-    g.DrawArc(&pen, cx - r, cy - r, r * 2.0f, r * 2.0f, 35.0f, 235.0f);
+    Gdiplus::SolidBrush fillBrush(moonFill);
+    Gdiplus::Pen outPen(outlineCol, max(1.2f, r * 0.18f));
+    outPen.SetLineJoin(Gdiplus::LineJoinRound);
+    g.FillPath(&fillBrush, &path);
+    g.DrawPath(&outPen, &path);
 }
 
 static void DrawCloud(Gdiplus::Graphics& g, float x, float y, float w, float h, Gdiplus::Color fillCol)
 {
-    Gdiplus::Color outlineCol(255, 34, 36, 46);
-    float rL = h * 0.36f;
-    float rM = h * 0.48f;
-    float rR = h * 0.34f;
-    float baseY = y + h * 0.82f;
+    Gdiplus::Color outlineCol(255, 32, 34, 44);
+    float stroke = max(1.4f, h * 0.10f);
 
-    Gdiplus::GraphicsPath path;
-    path.AddEllipse(x + w * 0.04f, baseY - rL * 2.0f, rL * 2.0f, rL * 2.0f);
-    path.AddEllipse(x + w * 0.22f, baseY - rM * 2.15f, rM * 2.0f, rM * 2.0f);
-    path.AddEllipse(x + w * 0.56f, baseY - rR * 2.0f, rR * 2.0f, rR * 2.0f);
-    path.AddRectangle(Gdiplus::RectF(x + w * 0.04f + rL, baseY - rL * 1.4f,
-                                     (x + w * 0.56f + rR) - (x + w * 0.04f + rL), rL * 1.4f));
+    float rL = h * 0.34f;
+    float rM = h * 0.44f;
+    float rR = h * 0.30f;
 
-    Gdiplus::SolidBrush brush(fillCol);
-    Gdiplus::Pen pen(outlineCol, max(1.2f, h * 0.09f));
-    pen.SetLineJoin(Gdiplus::LineJoinRound);
+    float cLx = x + w * 0.24f;
+    float cLy = y + h - rL;
 
-    // Рисуем обводку под заливкой, чтобы внутри облака не было лишних швов
-    Gdiplus::Pen thickOutline(outlineCol, max(2.2f, h * 0.18f));
-    thickOutline.SetLineJoin(Gdiplus::LineJoinRound);
-    g.DrawPath(&thickOutline, &path);
-    g.FillPath(&brush, &path);
+    float cMx = x + w * 0.48f;
+    float cMy = y + h * 0.46f;
+
+    float cRx = x + w * 0.76f;
+    float cRy = y + h - rR;
+
+    float bottomY = y + h;
+    float rectLeft = cLx;
+    float rectRight = cRx;
+    float rectTop = min(cLy, cRy) - h * 0.10f;
+    float rectH = bottomY - rectTop;
+
+    // Проход 1: цельный тёмный контур (без внутренних швов и дыр)
+    Gdiplus::SolidBrush outBrush(outlineCol);
+    g.FillEllipse(&outBrush, cLx - rL - stroke, cLy - rL - stroke, (rL + stroke) * 2.0f, (rL + stroke) * 2.0f);
+    g.FillEllipse(&outBrush, cMx - rM - stroke, cMy - rM - stroke, (rM + stroke) * 2.0f, (rM + stroke) * 2.0f);
+    g.FillEllipse(&outBrush, cRx - rR - stroke, cRy - rR - stroke, (rR + stroke) * 2.0f, (rR + stroke) * 2.0f);
+    g.FillRectangle(&outBrush, rectLeft, rectTop - stroke, rectRight - rectLeft, rectH + stroke * 2.0f);
+
+    // Проход 2: ровная сплошная заливка облака
+    Gdiplus::SolidBrush fillBrush(fillCol);
+    g.FillEllipse(&fillBrush, cLx - rL, cLy - rL, rL * 2.0f, rL * 2.0f);
+    g.FillEllipse(&fillBrush, cMx - rM, cMy - rM, rM * 2.0f, rM * 2.0f);
+    g.FillEllipse(&fillBrush, cRx - rR, cRy - rR, rR * 2.0f, rR * 2.0f);
+    g.FillRectangle(&fillBrush, rectLeft, rectTop, rectRight - rectLeft, rectH);
 }
 
 void CWeatherRUIconItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_mode)
@@ -186,14 +201,13 @@ void CWeatherRUIconItem::DrawItem(void* hDC, int x, int y, int w, int h, bool da
     g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
     g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
 
-    float s = static_cast<float>(min(w, h));
-    float ox = x + (w - s) * 0.5f;
-    float oy = y + (h - s) * 0.5f;
+    float cw = static_cast<float>(w);
+    float ch = static_cast<float>(h);
+    float s = min(cw, ch);
 
     int code = m_has_data ? m_wmo_code : 2;
     bool is_day = m_has_data ? m_is_day : true;
 
-    // Классификация WMO-кодов Open-Meteo
     bool is_clear = (code == 0);
     bool is_partly = (code == 1 || code == 2);
     bool is_overcast = (code == 3);
@@ -206,42 +220,46 @@ void CWeatherRUIconItem::DrawItem(void* hDC, int x, int y, int w, int h, bool da
     if (is_clear)
     {
         if (is_day)
-            DrawSun(g, ox + s * 0.50f, oy + s * 0.50f, s * 0.26f, true);
+            DrawSun(g, x + cw * 0.50f, y + ch * 0.50f, s * 0.27f, true);
         else
-            DrawGreyMoon(g, ox + s * 0.52f, oy + s * 0.50f, s * 0.34f);
+            DrawGreyMoon(g, x + cw * 0.52f, y + ch * 0.50f, s * 0.36f);
         return;
     }
 
     if (is_fog)
     {
         if (is_day)
-            DrawSun(g, ox + s * 0.50f, oy + s * 0.34f, s * 0.21f, false);
+            DrawSun(g, x + cw * 0.50f, y + ch * 0.32f, s * 0.22f, false);
         else
-            DrawGreyMoon(g, ox + s * 0.52f, oy + s * 0.34f, s * 0.24f);
+            DrawGreyMoon(g, x + cw * 0.52f, y + ch * 0.32f, s * 0.26f);
 
-        Gdiplus::Pen fogPen(Gdiplus::Color(235, 175, 186, 202), max(1.8f, s * 0.085f));
+        Gdiplus::Pen fogPen(Gdiplus::Color(235, 175, 186, 202), max(1.8f, ch * 0.09f));
         fogPen.SetStartCap(Gdiplus::LineCapRound);
         fogPen.SetEndCap(Gdiplus::LineCapRound);
-        g.DrawLine(&fogPen, ox + s * 0.14f, oy + s * 0.56f, ox + s * 0.86f, oy + s * 0.56f);
-        g.DrawLine(&fogPen, ox + s * 0.22f, oy + s * 0.72f, ox + s * 0.78f, oy + s * 0.72f);
-        g.DrawLine(&fogPen, ox + s * 0.16f, oy + s * 0.88f, ox + s * 0.84f, oy + s * 0.88f);
+        g.DrawLine(&fogPen, x + cw * 0.14f, y + ch * 0.58f, x + cw * 0.86f, y + ch * 0.58f);
+        g.DrawLine(&fogPen, x + cw * 0.22f, y + ch * 0.74f, x + cw * 0.78f, y + ch * 0.74f);
+        g.DrawLine(&fogPen, x + cw * 0.16f, y + ch * 0.90f, x + cw * 0.84f, y + ch * 0.90f);
         return;
     }
 
-    // Для всех облачных/осадочных состояний: солнце или серая луна выглядывают справа сверху
+    // Солнце или серая луна чётко выглядывают справа сверху
+    float orbCx = x + cw * 0.70f;
+    float orbCy = y + ch * 0.32f;
     if (is_day)
-        DrawSun(g, ox + s * 0.68f, oy + s * 0.30f, s * 0.20f, is_partly);
+        DrawSun(g, orbCx, orbCy, s * 0.24f, is_partly);
     else
-        DrawGreyMoon(g, ox + s * 0.68f, oy + s * 0.30f, s * 0.22f);
+        DrawGreyMoon(g, orbCx, orbCy, s * 0.28f);
 
-    // Цвет облака в стиле YuLu_Dark
-    Gdiplus::Color cloudCol = Gdiplus::Color(255, 56, 168, 232); // яркий голубой (как в оригинале)
+    Gdiplus::Color cloudCol = Gdiplus::Color(255, 56, 168, 232);
     if (is_overcast) cloudCol = Gdiplus::Color(255, 118, 152, 184);
     else if (is_heavy_rain || is_storm) cloudCol = Gdiplus::Color(255, 86, 118, 152);
 
-    float cloudH = (is_partly || is_overcast) ? s * 0.68f : s * 0.56f;
-    float cloudY = (is_partly || is_overcast) ? oy + s * 0.24f : oy + s * 0.16f;
-    DrawCloud(g, ox + s * 0.04f, cloudY, s * 0.86f, cloudH, cloudCol);
+    bool has_precip = (is_light_rain || is_heavy_rain || is_snow || is_storm);
+    float cloudW = cw * 0.76f;
+    float cloudH = has_precip ? ch * 0.50f : ch * 0.58f;
+    float cloudX = x + cw * 0.05f;
+    float cloudY = has_precip ? y + ch * 0.20f : y + ch * 0.34f;
+    DrawCloud(g, cloudX, cloudY, cloudW, cloudH, cloudCol);
 
     if (is_light_rain || is_heavy_rain)
     {
@@ -249,38 +267,38 @@ void CWeatherRUIconItem::DrawItem(void* hDC, int x, int y, int w, int h, bool da
         rainPen.SetStartCap(Gdiplus::LineCapRound);
         rainPen.SetEndCap(Gdiplus::LineCapRound);
         int count = is_heavy_rain ? 4 : 3;
-        float startX = is_heavy_rain ? 0.22f : 0.26f;
-        float stepX = is_heavy_rain ? 0.17f : 0.22f;
+        float startX = is_heavy_rain ? 0.18f : 0.22f;
+        float stepX = is_heavy_rain ? 0.15f : 0.19f;
         for (int i = 0; i < count; ++i)
         {
-            float rx = ox + s * (startX + i * stepX);
-            float ry = oy + s * (i % 2 == 0 ? 0.72f : 0.77f);
-            g.DrawLine(&rainPen, rx, ry, rx - s * 0.06f, ry + s * 0.16f);
+            float rx = x + cw * (startX + i * stepX);
+            float ry = y + ch * (i % 2 == 0 ? 0.74f : 0.78f);
+            g.DrawLine(&rainPen, rx, ry, rx - s * 0.06f, ry + ch * 0.16f);
         }
     }
     else if (is_snow)
     {
         Gdiplus::SolidBrush snowBrush(Gdiplus::Color(255, 226, 242, 255));
         float rDot = max(1.5f, s * 0.07f);
-        float xs[3] = { 0.26f, 0.48f, 0.70f };
-        float ys[3] = { 0.78f, 0.85f, 0.78f };
+        float xs[3] = { 0.24f, 0.43f, 0.62f };
+        float ys[3] = { 0.80f, 0.87f, 0.80f };
         for (int i = 0; i < 3; ++i)
         {
-            g.FillEllipse(&snowBrush, ox + s * xs[i] - rDot, oy + s * ys[i] - rDot, rDot * 2.0f, rDot * 2.0f);
+            g.FillEllipse(&snowBrush, x + cw * xs[i] - rDot, y + ch * ys[i] - rDot, rDot * 2.0f, rDot * 2.0f);
         }
     }
     else if (is_storm)
     {
         Gdiplus::PointF bolt[6] = {
-            { ox + s * 0.48f, oy + s * 0.56f },
-            { ox + s * 0.36f, oy + s * 0.76f },
-            { ox + s * 0.47f, oy + s * 0.76f },
-            { ox + s * 0.40f, oy + s * 0.96f },
-            { ox + s * 0.62f, oy + s * 0.70f },
-            { ox + s * 0.50f, oy + s * 0.70f }
+            { x + cw * 0.44f, y + ch * 0.56f },
+            { x + cw * 0.34f, y + ch * 0.76f },
+            { x + cw * 0.43f, y + ch * 0.76f },
+            { x + cw * 0.37f, y + ch * 0.96f },
+            { x + cw * 0.56f, y + ch * 0.70f },
+            { x + cw * 0.46f, y + ch * 0.70f }
         };
         Gdiplus::SolidBrush boltBrush(Gdiplus::Color(255, 255, 214, 42));
-        Gdiplus::Pen boltOutline(Gdiplus::Color(255, 34, 36, 46), max(1.0f, s * 0.04f));
+        Gdiplus::Pen boltOutline(Gdiplus::Color(255, 32, 34, 44), max(1.0f, s * 0.04f));
         g.FillPolygon(&boltBrush, bolt, 6);
         g.DrawPolygon(&boltOutline, bolt, 6);
     }
