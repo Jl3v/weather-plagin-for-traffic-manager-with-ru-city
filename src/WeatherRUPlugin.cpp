@@ -3,10 +3,8 @@
 #include "resource.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
-#include <fstream>
-#include <sstream>
+#include <cstdlib>
 
 HMODULE CWeatherRUPlugin::s_hModule = nullptr;
 
@@ -29,7 +27,7 @@ const wchar_t* CWeatherRUItem::GetItemLableText() const
 
 const wchar_t* CWeatherRUItem::GetItemValueText() const
 {
-    return m_value_text.c_str();
+    return m_value_buf;
 }
 
 const wchar_t* CWeatherRUItem::GetItemValueSampleText() const
@@ -37,9 +35,13 @@ const wchar_t* CWeatherRUItem::GetItemValueSampleText() const
     return L"-15 °C";
 }
 
-void CWeatherRUItem::SetValueText(const std::wstring& text)
+void CWeatherRUItem::SetValueText(const wchar_t* text)
 {
-    m_value_text = text;
+    if (!text) return;
+    size_t i = 0;
+    for (; i < 31 && text[i] != L'\0'; ++i)
+        m_value_buf[i] = text[i];
+    m_value_buf[i] = L'\0';
 }
 
 // ================= Options Dialog =================
@@ -75,8 +77,9 @@ static INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARA
         int selected_idx = 1;
         for (int i = 0; i < 4; ++i)
         {
-            std::wstring label = std::to_wstring(kIntervals[i]) + L" мин";
-            SendMessageW(hInt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+            wchar_t label[32];
+            wsprintfW(label, L"%d мин", kIntervals[i]);
+            SendMessageW(hInt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label));
             if (kIntervals[i] == state->cfg.update_interval_min)
                 selected_idx = i;
         }
@@ -112,8 +115,11 @@ static INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARA
                 auto w = WeatherClient::FetchCurrentTemperature(geo.lat, geo.lon);
                 if (w.ok)
                 {
+                    int tenths = (int)(w.temperature_c >= 0.0 ? (w.temperature_c * 10.0 + 0.5) : (w.temperature_c * 10.0 - 0.5));
+                    bool neg = (tenths < 0);
+                    int abs_t = neg ? -tenths : tenths;
                     wchar_t tbuf[64];
-                    std::swprintf(tbuf, 64, L"%.1f °C", w.temperature_c);
+                    wsprintfW(tbuf, neg ? L"-%d.%d °C" : L"%d.%d °C", abs_t / 10, abs_t % 10);
                     std::wstring ok_msg = L"Найден: " + geo.resolved_name + L"\nСейчас: " + tbuf;
                     SetDlgItemTextW(hDlg, IDC_STATIC_STATUS, ok_msg.c_str());
                 }
@@ -195,11 +201,16 @@ HMODULE CWeatherRUPlugin::GetModuleHandle()
 
 CWeatherRUPlugin::CWeatherRUPlugin()
 {
+    InitializeCriticalSection(&m_cs);
+    m_stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    m_wake_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 }
 
 CWeatherRUPlugin::~CWeatherRUPlugin()
 {
     StopWorker();
+    if (m_stop_event) CloseHandle(m_stop_event);
+    if (m_wake_event) CloseHandle(m_wake_event);
 }
 
 IPluginItem* CWeatherRUPlugin::GetItem(int index)
@@ -211,137 +222,126 @@ IPluginItem* CWeatherRUPlugin::GetItem(int index)
 
 void CWeatherRUPlugin::StartWorkerIfNeeded()
 {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    EnterCriticalSection(&m_cs);
     if (!m_worker_started)
     {
         m_worker_started = true;
-        m_stop = false;
-        m_force_refresh = true;
-        m_worker = std::thread(&CWeatherRUPlugin::WorkerLoop, this);
+        ResetEvent(m_stop_event);
+        SetEvent(m_wake_event);
+        m_thread = CreateThread(nullptr, 0, &CWeatherRUPlugin::WorkerThreadProc, this, 0, nullptr);
     }
+    LeaveCriticalSection(&m_cs);
 }
 
 void CWeatherRUPlugin::StopWorker()
 {
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        if (!m_worker_started) return;
-        m_stop = true;
-    }
-    m_cv.notify_all();
-    // Не вызываем join() при выгрузке DLL, чтобы исключить Loader Lock deadlock
-    if (m_worker.joinable())
-        m_worker.detach();
+    EnterCriticalSection(&m_cs);
+    bool started = m_worker_started;
     m_worker_started = false;
+    HANDLE hThread = m_thread;
+    m_thread = nullptr;
+    LeaveCriticalSection(&m_cs);
+
+    if (started && m_stop_event)
+        SetEvent(m_stop_event);
+    if (hThread)
+        CloseHandle(hThread);
 }
 
 void CWeatherRUPlugin::TriggerImmediateRefresh()
 {
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_force_refresh = true;
-    }
-    m_cv.notify_all();
+    if (m_wake_event)
+        SetEvent(m_wake_event);
+}
+
+DWORD WINAPI CWeatherRUPlugin::WorkerThreadProc(LPVOID param)
+{
+    auto* self = reinterpret_cast<CWeatherRUPlugin*>(param);
+    if (self)
+        self->WorkerLoop();
+    return 0;
 }
 
 void CWeatherRUPlugin::WorkerLoop()
 {
-    try
+    HANDLE events[2] = { m_stop_event, m_wake_event };
+    DWORD wait_ms = 0;
+
+    while (true)
     {
-        while (true)
+        DWORD wr = WaitForMultipleObjects(2, events, FALSE, wait_ms);
+        if (wr == WAIT_OBJECT_0)
+            break;
+
+        PluginConfig cfg_snapshot = GetConfigCopy();
+        auto res = WeatherClient::FetchCurrentTemperature(cfg_snapshot.lat, cfg_snapshot.lon);
+
+        EnterCriticalSection(&m_cs);
+        if (res.ok)
         {
-            PluginConfig cfg_snapshot;
-            {
-                std::unique_lock<std::mutex> lock(m_mutex);
-                if (m_stop) break;
+            m_has_temp = true;
+            m_last_temp = res.temperature_c;
+            m_last_error.clear();
 
-                if (!m_force_refresh)
-                {
-                    m_cv.wait_until(lock, m_next_fetch_time, [this]() {
-                        return m_stop || m_force_refresh;
-                    });
-                    if (m_stop) break;
-                }
-                m_force_refresh = false;
-                cfg_snapshot = m_config;
-            }
+            SYSTEMTIME st{};
+            GetLocalTime(&st);
+            wchar_t time_buf[32];
+            wsprintfW(time_buf, L"%02d:%02d", (int)st.wHour, (int)st.wMinute);
+            m_last_update_str = time_buf;
 
-            auto res = WeatherClient::FetchCurrentTemperature(cfg_snapshot.lat, cfg_snapshot.lon);
-
-            {
-                std::lock_guard<std::mutex> lock(m_mutex);
-                if (m_stop) break;
-
-                if (res.ok)
-                {
-                    m_has_temp = true;
-                    m_last_temp = res.temperature_c;
-                    m_last_error.clear();
-
-                    SYSTEMTIME st{};
-                    GetLocalTime(&st);
-                    wchar_t time_buf[32];
-                    std::swprintf(time_buf, 32, L"%02d:%02d", st.wHour, st.wMinute);
-                    m_last_update_str = time_buf;
-
-                    int interval = (std::max)(5, m_config.update_interval_min);
-                    m_next_fetch_time = std::chrono::steady_clock::now() + std::chrono::minutes(interval);
-                }
-                else
-                {
-                    m_last_error = res.error;
-                    m_next_fetch_time = std::chrono::steady_clock::now() + std::chrono::minutes(2);
-                }
-            }
+            int interval = m_config.update_interval_min;
+            if (interval < 5) interval = 5;
+            wait_ms = (DWORD)interval * 60U * 1000U;
         }
-    }
-    catch (...)
-    {
+        else
+        {
+            m_last_error = res.error;
+            wait_ms = 2U * 60U * 1000U;
+        }
+        LeaveCriticalSection(&m_cs);
     }
 }
 
-std::wstring CWeatherRUPlugin::FormatTemperature(double temp_c, bool show_plus, bool round_temp) const
+void CWeatherRUPlugin::FormatTemperature(double temp_c, bool show_plus, bool round_temp, wchar_t* out, size_t out_len) const
 {
-    wchar_t buf[32];
+    if (!out || out_len < 16) return;
+
     if (round_temp)
     {
-        int t = static_cast<int>(std::lround(temp_c));
+        int t = (int)(temp_c >= 0.0 ? (temp_c + 0.5) : (temp_c - 0.5));
         if (t > 0 && show_plus)
-            std::swprintf(buf, 32, L"+%d °C", t);
+            wsprintfW(out, L"+%d °C", t);
         else
-            std::swprintf(buf, 32, L"%d °C", t);
+            wsprintfW(out, L"%d °C", t);
     }
     else
     {
-        double t = std::round(temp_c * 10.0) / 10.0;
-        if (t == -0.0) t = 0.0;
-        if (t > 0.0 && show_plus)
-            std::swprintf(buf, 32, L"+%.1f °C", t);
+        int tenths = (int)(temp_c >= 0.0 ? (temp_c * 10.0 + 0.5) : (temp_c * 10.0 - 0.5));
+        bool neg = (tenths < 0);
+        int abs_t = neg ? -tenths : tenths;
+        int whole = abs_t / 10;
+        int frac = abs_t % 10;
+
+        if (neg)
+            wsprintfW(out, L"-%d.%d °C", whole, frac);
+        else if (tenths > 0 && show_plus)
+            wsprintfW(out, L"+%d.%d °C", whole, frac);
         else
-            std::swprintf(buf, 32, L"%.1f °C", t);
+            wsprintfW(out, L"%d.%d °C", whole, frac);
     }
-    return buf;
 }
 
 void CWeatherRUPlugin::DataRequired()
 {
-    try
-    {
-        StartWorkerIfNeeded();
+    StartWorkerIfNeeded();
 
-        std::wstring display;
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_has_temp)
-                display = FormatTemperature(m_last_temp, m_config.show_plus, m_config.round_temp);
-            else
-                display = L"-- °C";
-        }
-        m_item.SetValueText(display);
-    }
-    catch (...)
-    {
-    }
+    wchar_t display[32] = L"-- °C";
+    EnterCriticalSection(&m_cs);
+    if (m_has_temp)
+        FormatTemperature(m_last_temp, m_config.show_plus, m_config.round_temp, display, 32);
+    LeaveCriticalSection(&m_cs);
+
+    m_item.SetValueText(display);
 }
 
 ITMPlugin::OptionReturn CWeatherRUPlugin::ShowOptionsDialog(void* hParent)
@@ -366,30 +366,41 @@ ITMPlugin::OptionReturn CWeatherRUPlugin::ShowOptionsDialog(void* hParent)
 
 PluginConfig CWeatherRUPlugin::GetConfigCopy()
 {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    return m_config;
+    EnterCriticalSection(&m_cs);
+    PluginConfig copy = m_config;
+    LeaveCriticalSection(&m_cs);
+    return copy;
 }
 
 void CWeatherRUPlugin::ApplyConfig(const PluginConfig& cfg)
 {
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_config = cfg;
-    }
+    EnterCriticalSection(&m_cs);
+    m_config = cfg;
+    LeaveCriticalSection(&m_cs);
+
     SaveConfig();
     TriggerImmediateRefresh();
 }
 
 std::wstring CWeatherRUPlugin::GetStatusSummary()
 {
-    std::lock_guard<std::mutex> lock(m_mutex);
+    EnterCriticalSection(&m_cs);
     std::wstring s = L"Город: " + m_config.city_name + L"\n";
     if (!m_last_error.empty())
+    {
         s += L"Ошибка: " + m_last_error;
+    }
     else if (m_has_temp)
-        s += L"Обновлено в " + m_last_update_str + L" (" + FormatTemperature(m_last_temp, m_config.show_plus, m_config.round_temp) + L")";
+    {
+        wchar_t tbuf[32] = {};
+        FormatTemperature(m_last_temp, m_config.show_plus, m_config.round_temp, tbuf, 32);
+        s += L"Обновлено в " + m_last_update_str + L" (" + tbuf + L")";
+    }
     else
+    {
         s += L"Ожидание первого обновления...";
+    }
+    LeaveCriticalSection(&m_cs);
     return s;
 }
 
@@ -401,7 +412,7 @@ const wchar_t* CWeatherRUPlugin::GetInfo(PluginInfoIndex index)
     case TMI_DESCRIPTION: return L"Отображает актуальную температуру для городов России через Open-Meteo (без API-ключа).";
     case TMI_AUTHOR:      return L"Custom Plugin";
     case TMI_COPYRIGHT:   return L"MIT License";
-    case TMI_VERSION:     return L"1.0.1";
+    case TMI_VERSION:     return L"1.0.2";
     case TMI_URL:         return L"https://open-meteo.com/";
     default:              return L"";
     }
@@ -409,33 +420,32 @@ const wchar_t* CWeatherRUPlugin::GetInfo(PluginInfoIndex index)
 
 void CWeatherRUPlugin::OnExtenedInfo(ExtendedInfoIndex index, const wchar_t* data)
 {
-    try
+    if (index == EI_CONFIG_DIR && data != nullptr && data[0] != L'\0')
     {
-        if (index == EI_CONFIG_DIR && data != nullptr && data[0] != L'\0')
-        {
-            m_config_dir = data;
-            LoadConfig();
-        }
+        m_config_dir = data;
+        LoadConfig();
     }
-    catch (...)
+}
+
+std::wstring CWeatherRUPlugin::GetModuleDir() const
+{
+    std::wstring dir;
+    wchar_t path[MAX_PATH] = {};
+    if (GetModuleFileNameW(s_hModule, path, MAX_PATH))
     {
+        std::wstring full(path);
+        size_t slash = full.find_last_of(L"\\/");
+        if (slash != std::wstring::npos)
+            dir = full.substr(0, slash + 1);
     }
+    return dir;
 }
 
 std::wstring CWeatherRUPlugin::GetConfigFilePath() const
 {
     std::wstring dir = m_config_dir;
     if (dir.empty())
-    {
-        wchar_t path[MAX_PATH] = {};
-        if (GetModuleFileNameW(s_hModule, path, MAX_PATH))
-        {
-            std::wstring full(path);
-            size_t slash = full.find_last_of(L"\\/");
-            if (slash != std::wstring::npos)
-                dir = full.substr(0, slash);
-        }
-    }
+        dir = GetModuleDir();
     if (!dir.empty() && dir.back() != L'\\' && dir.back() != L'/')
         dir.push_back(L'\\');
     return dir + L"WeatherRU.ini";
@@ -444,13 +454,32 @@ std::wstring CWeatherRUPlugin::GetConfigFilePath() const
 void CWeatherRUPlugin::LoadConfig()
 {
     std::wstring path = GetConfigFilePath();
-    std::ifstream in(path);
-    if (!in.is_open()) return;
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) return;
 
-    std::lock_guard<std::mutex> lock(m_mutex);
-    std::string line;
-    while (std::getline(in, line))
+    DWORD size = GetFileSize(hFile, nullptr);
+    if (size == INVALID_FILE_SIZE || size == 0 || size > 65536)
     {
+        CloseHandle(hFile);
+        return;
+    }
+
+    std::string content(size, '\0');
+    DWORD read = 0;
+    ReadFile(hFile, &content[0], size, &read, nullptr);
+    CloseHandle(hFile);
+    content.resize(read);
+
+    EnterCriticalSection(&m_cs);
+    size_t pos = 0;
+    while (pos < content.size())
+    {
+        size_t nl = content.find('\n', pos);
+        if (nl == std::string::npos) nl = content.size();
+        std::string line = content.substr(pos, nl - pos);
+        pos = nl + 1;
+
         if (!line.empty() && line.back() == '\r') line.pop_back();
         size_t eq = line.find('=');
         if (eq == std::string::npos) continue;
@@ -460,18 +489,19 @@ void CWeatherRUPlugin::LoadConfig()
         if (key == "city") m_config.city_name = WeatherClient::Utf8ToWide(val);
         else if (key == "lat") m_config.lat = std::strtod(val.c_str(), nullptr);
         else if (key == "lon") m_config.lon = std::strtod(val.c_str(), nullptr);
-        else if (key == "interval") m_config.update_interval_min = (std::max)(5, std::atoi(val.c_str()));
+        else if (key == "interval")
+        {
+            int iv = std::atoi(val.c_str());
+            m_config.update_interval_min = (iv < 5) ? 5 : iv;
+        }
         else if (key == "show_plus") m_config.show_plus = (val == "1");
         else if (key == "round_temp") m_config.round_temp = (val == "1");
     }
+    LeaveCriticalSection(&m_cs);
 }
 
 void CWeatherRUPlugin::SaveConfig()
 {
-    std::wstring path = GetConfigFilePath();
-    std::ofstream out(path, std::ios::trunc);
-    if (!out.is_open()) return;
-
     PluginConfig cfg = GetConfigCopy();
     char lat_buf[32], lon_buf[32];
     std::snprintf(lat_buf, sizeof(lat_buf), "%.5f", cfg.lat);
@@ -480,12 +510,23 @@ void CWeatherRUPlugin::SaveConfig()
     std::replace(lat_s.begin(), lat_s.end(), ',', '.');
     std::replace(lon_s.begin(), lon_s.end(), ',', '.');
 
-    out << "city=" << WeatherClient::WideToUtf8(cfg.city_name) << "\n";
-    out << "lat=" << lat_s << "\n";
-    out << "lon=" << lon_s << "\n";
-    out << "interval=" << cfg.update_interval_min << "\n";
-    out << "show_plus=" << (cfg.show_plus ? "1" : "0") << "\n";
-    out << "round_temp=" << (cfg.round_temp ? "1" : "0") << "\n";
+    std::string data;
+    data += "city=" + WeatherClient::WideToUtf8(cfg.city_name) + "\n";
+    data += "lat=" + lat_s + "\n";
+    data += "lon=" + lon_s + "\n";
+    data += "interval=" + std::to_string(cfg.update_interval_min) + "\n";
+    data += "show_plus=" + std::string(cfg.show_plus ? "1" : "0") + "\n";
+    data += "round_temp=" + std::string(cfg.round_temp ? "1" : "0") + "\n";
+
+    std::wstring path = GetConfigFilePath();
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0,
+                               nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE)
+    {
+        DWORD written = 0;
+        WriteFile(hFile, data.data(), (DWORD)data.size(), &written, nullptr);
+        CloseHandle(hFile);
+    }
 }
 
 // ================= DLL Exports =================
