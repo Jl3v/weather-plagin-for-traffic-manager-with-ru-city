@@ -2,17 +2,34 @@
 #include "WeatherClient.h"
 #include "resource.h"
 
+#include <objidl.h>
 #include <shellapi.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
+using std::min;
+using std::max;
+#include <gdiplus.h>
+
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "gdiplus.lib")
 
 HMODULE CWeatherRUPlugin::s_hModule = nullptr;
 
-// ================= CWeatherRUItem =================
+static ULONG_PTR g_gdiplusToken = 0;
+static void EnsureGdiPlus()
+{
+    if (g_gdiplusToken == 0)
+    {
+        Gdiplus::GdiplusStartupInput input;
+        Gdiplus::GdiplusStartup(&g_gdiplusToken, &input, nullptr);
+    }
+}
+
+// ================= CWeatherRUItem (Температура) =================
 
 const wchar_t* CWeatherRUItem::GetItemName() const
 {
@@ -46,6 +63,227 @@ void CWeatherRUItem::SetValueText(const wchar_t* text)
     for (; i < 31 && text[i] != L'\0'; ++i)
         m_value_buf[i] = text[i];
     m_value_buf[i] = L'\0';
+}
+
+// ================= CWeatherRUIconItem (Динамическая иконка) =================
+
+const wchar_t* CWeatherRUIconItem::GetItemName() const
+{
+    return L"Погода (РФ) - Иконка";
+}
+
+const wchar_t* CWeatherRUIconItem::GetItemId() const
+{
+    return L"WeatherRU_Icon";
+}
+
+const wchar_t* CWeatherRUIconItem::GetItemLableText() const
+{
+    return L"";
+}
+
+const wchar_t* CWeatherRUIconItem::GetItemValueText() const
+{
+    return L"";
+}
+
+const wchar_t* CWeatherRUIconItem::GetItemValueSampleText() const
+{
+    return L"";
+}
+
+void CWeatherRUIconItem::SetWeatherState(int wmo_code, bool is_day, bool has_data)
+{
+    m_wmo_code = wmo_code;
+    m_is_day = is_day;
+    m_has_data = has_data;
+}
+
+static void DrawSun(Gdiplus::Graphics& g, float cx, float cy, float r, bool with_rays)
+{
+    Gdiplus::Color outlineCol(255, 34, 36, 46);
+    Gdiplus::Color sunFill(255, 255, 198, 56);
+    Gdiplus::Color sunRay(255, 255, 174, 42);
+
+    if (with_rays)
+    {
+        Gdiplus::Pen rayPen(sunRay, max(1.3f, r * 0.24f));
+        rayPen.SetStartCap(Gdiplus::LineCapRound);
+        rayPen.SetEndCap(Gdiplus::LineCapRound);
+        for (int i = 0; i < 8; ++i)
+        {
+            float ang = i * 3.14159265f / 4.0f;
+            float r1 = r * 1.25f;
+            float r2 = r * 1.68f;
+            g.DrawLine(&rayPen, cx + std::cos(ang) * r1, cy + std::sin(ang) * r1,
+                                cx + std::cos(ang) * r2, cy + std::sin(ang) * r2);
+        }
+    }
+
+    Gdiplus::SolidBrush brush(sunFill);
+    Gdiplus::Pen pen(outlineCol, max(1.2f, r * 0.18f));
+    g.FillEllipse(&brush, cx - r, cy - r, r * 2.0f, r * 2.0f);
+    g.DrawEllipse(&pen, cx - r, cy - r, r * 2.0f, r * 2.0f);
+}
+
+static void DrawGreyMoon(Gdiplus::Graphics& g, float cx, float cy, float r)
+{
+    Gdiplus::Color moonFill(255, 184, 192, 204);
+    Gdiplus::Color outlineCol(255, 34, 36, 46);
+
+    Gdiplus::GraphicsPath outerPath;
+    outerPath.AddEllipse(cx - r, cy - r, r * 2.0f, r * 2.0f);
+
+    Gdiplus::GraphicsPath cutPath;
+    float ox = cx + r * 0.48f;
+    float oy = cy - r * 0.28f;
+    float cr = r * 0.88f;
+    cutPath.AddEllipse(ox - cr, oy - cr, cr * 2.0f, cr * 2.0f);
+
+    Gdiplus::Region moonReg(&outerPath);
+    moonReg.Exclude(&cutPath);
+
+    Gdiplus::SolidBrush brush(moonFill);
+    g.FillRegion(&brush, &moonReg);
+
+    // Аккуратная обводка внешнего края полумесяца
+    Gdiplus::Pen pen(outlineCol, max(1.1f, r * 0.16f));
+    g.DrawArc(&pen, cx - r, cy - r, r * 2.0f, r * 2.0f, 35.0f, 235.0f);
+}
+
+static void DrawCloud(Gdiplus::Graphics& g, float x, float y, float w, float h, Gdiplus::Color fillCol)
+{
+    Gdiplus::Color outlineCol(255, 34, 36, 46);
+    float rL = h * 0.36f;
+    float rM = h * 0.48f;
+    float rR = h * 0.34f;
+    float baseY = y + h * 0.82f;
+
+    Gdiplus::GraphicsPath path;
+    path.AddEllipse(x + w * 0.04f, baseY - rL * 2.0f, rL * 2.0f, rL * 2.0f);
+    path.AddEllipse(x + w * 0.22f, baseY - rM * 2.15f, rM * 2.0f, rM * 2.0f);
+    path.AddEllipse(x + w * 0.56f, baseY - rR * 2.0f, rR * 2.0f, rR * 2.0f);
+    path.AddRectangle(Gdiplus::RectF(x + w * 0.04f + rL, baseY - rL * 1.4f,
+                                     (x + w * 0.56f + rR) - (x + w * 0.04f + rL), rL * 1.4f));
+
+    Gdiplus::SolidBrush brush(fillCol);
+    Gdiplus::Pen pen(outlineCol, max(1.2f, h * 0.09f));
+    pen.SetLineJoin(Gdiplus::LineJoinRound);
+
+    // Рисуем обводку под заливкой, чтобы внутри облака не было лишних швов
+    Gdiplus::Pen thickOutline(outlineCol, max(2.2f, h * 0.18f));
+    thickOutline.SetLineJoin(Gdiplus::LineJoinRound);
+    g.DrawPath(&thickOutline, &path);
+    g.FillPath(&brush, &path);
+}
+
+void CWeatherRUIconItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark_mode)
+{
+    if (!hDC || w <= 4 || h <= 4) return;
+    EnsureGdiPlus();
+
+    Gdiplus::Graphics g(reinterpret_cast<HDC>(hDC));
+    g.SetSmoothingMode(Gdiplus::SmoothingModeHighQuality);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+
+    float s = static_cast<float>(min(w, h));
+    float ox = x + (w - s) * 0.5f;
+    float oy = y + (h - s) * 0.5f;
+
+    int code = m_has_data ? m_wmo_code : 2;
+    bool is_day = m_has_data ? m_is_day : true;
+
+    // Классификация WMO-кодов Open-Meteo
+    bool is_clear = (code == 0);
+    bool is_partly = (code == 1 || code == 2);
+    bool is_overcast = (code == 3);
+    bool is_fog = (code == 45 || code == 48);
+    bool is_light_rain = (code == 51 || code == 53 || code == 55 || code == 56 || code == 57 || code == 61 || code == 80);
+    bool is_heavy_rain = (code == 63 || code == 65 || code == 66 || code == 67 || code == 81 || code == 82);
+    bool is_snow = (code == 71 || code == 73 || code == 75 || code == 77 || code == 85 || code == 86);
+    bool is_storm = (code == 95 || code == 96 || code == 99);
+
+    if (is_clear)
+    {
+        if (is_day)
+            DrawSun(g, ox + s * 0.50f, oy + s * 0.50f, s * 0.26f, true);
+        else
+            DrawGreyMoon(g, ox + s * 0.52f, oy + s * 0.50f, s * 0.34f);
+        return;
+    }
+
+    if (is_fog)
+    {
+        if (is_day)
+            DrawSun(g, ox + s * 0.50f, oy + s * 0.34f, s * 0.21f, false);
+        else
+            DrawGreyMoon(g, ox + s * 0.52f, oy + s * 0.34f, s * 0.24f);
+
+        Gdiplus::Pen fogPen(Gdiplus::Color(235, 175, 186, 202), max(1.8f, s * 0.085f));
+        fogPen.SetStartCap(Gdiplus::LineCapRound);
+        fogPen.SetEndCap(Gdiplus::LineCapRound);
+        g.DrawLine(&fogPen, ox + s * 0.14f, oy + s * 0.56f, ox + s * 0.86f, oy + s * 0.56f);
+        g.DrawLine(&fogPen, ox + s * 0.22f, oy + s * 0.72f, ox + s * 0.78f, oy + s * 0.72f);
+        g.DrawLine(&fogPen, ox + s * 0.16f, oy + s * 0.88f, ox + s * 0.84f, oy + s * 0.88f);
+        return;
+    }
+
+    // Для всех облачных/осадочных состояний: солнце или серая луна выглядывают справа сверху
+    if (is_day)
+        DrawSun(g, ox + s * 0.68f, oy + s * 0.30f, s * 0.20f, is_partly);
+    else
+        DrawGreyMoon(g, ox + s * 0.68f, oy + s * 0.30f, s * 0.22f);
+
+    // Цвет облака в стиле YuLu_Dark
+    Gdiplus::Color cloudCol = Gdiplus::Color(255, 56, 168, 232); // яркий голубой (как в оригинале)
+    if (is_overcast) cloudCol = Gdiplus::Color(255, 118, 152, 184);
+    else if (is_heavy_rain || is_storm) cloudCol = Gdiplus::Color(255, 86, 118, 152);
+
+    float cloudH = (is_partly || is_overcast) ? s * 0.68f : s * 0.56f;
+    float cloudY = (is_partly || is_overcast) ? oy + s * 0.24f : oy + s * 0.16f;
+    DrawCloud(g, ox + s * 0.04f, cloudY, s * 0.86f, cloudH, cloudCol);
+
+    if (is_light_rain || is_heavy_rain)
+    {
+        Gdiplus::Pen rainPen(Gdiplus::Color(255, 72, 204, 255), max(1.5f, s * 0.075f));
+        rainPen.SetStartCap(Gdiplus::LineCapRound);
+        rainPen.SetEndCap(Gdiplus::LineCapRound);
+        int count = is_heavy_rain ? 4 : 3;
+        float startX = is_heavy_rain ? 0.22f : 0.26f;
+        float stepX = is_heavy_rain ? 0.17f : 0.22f;
+        for (int i = 0; i < count; ++i)
+        {
+            float rx = ox + s * (startX + i * stepX);
+            float ry = oy + s * (i % 2 == 0 ? 0.72f : 0.77f);
+            g.DrawLine(&rainPen, rx, ry, rx - s * 0.06f, ry + s * 0.16f);
+        }
+    }
+    else if (is_snow)
+    {
+        Gdiplus::SolidBrush snowBrush(Gdiplus::Color(255, 226, 242, 255));
+        float rDot = max(1.5f, s * 0.07f);
+        float xs[3] = { 0.26f, 0.48f, 0.70f };
+        float ys[3] = { 0.78f, 0.85f, 0.78f };
+        for (int i = 0; i < 3; ++i)
+        {
+            g.FillEllipse(&snowBrush, ox + s * xs[i] - rDot, oy + s * ys[i] - rDot, rDot * 2.0f, rDot * 2.0f);
+        }
+    }
+    else if (is_storm)
+    {
+        Gdiplus::PointF bolt[6] = {
+            { ox + s * 0.48f, oy + s * 0.56f },
+            { ox + s * 0.36f, oy + s * 0.76f },
+            { ox + s * 0.47f, oy + s * 0.76f },
+            { ox + s * 0.40f, oy + s * 0.96f },
+            { ox + s * 0.62f, oy + s * 0.70f },
+            { ox + s * 0.50f, oy + s * 0.70f }
+        };
+        Gdiplus::SolidBrush boltBrush(Gdiplus::Color(255, 255, 214, 42));
+        Gdiplus::Pen boltOutline(Gdiplus::Color(255, 34, 36, 46), max(1.0f, s * 0.04f));
+        g.FillPolygon(&boltBrush, bolt, 6);
+        g.DrawPolygon(&boltOutline, bolt, 6);
+    }
 }
 
 // ================= Options Dialog =================
@@ -95,7 +333,6 @@ static INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARA
 
         SetDlgItemTextW(hDlg, IDC_STATIC_STATUS, state->plugin->GetStatusSummary().c_str());
 
-        // Подчёркнутый шрифт для кликабельной ссылки источника
         HFONT hFont = reinterpret_cast<HFONT>(SendDlgItemMessageW(hDlg, IDC_STATIC_HINT, WM_GETFONT, 0, 0));
         if (!hFont) hFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
         LOGFONTW lf{};
@@ -165,7 +402,7 @@ static INT_PTR CALLBACK OptionsDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARA
                     int abs_t = neg ? -tenths : tenths;
                     wchar_t tbuf[64];
                     wsprintfW(tbuf, neg ? L"-%d.%d °C" : L"%d.%d °C", abs_t / 10, abs_t % 10);
-                    std::wstring ok_msg = L"Найден: " + geo.resolved_name + L"\nСейчас: " + tbuf;
+                    std::wstring ok_msg = L"Найден: " + geo.resolved_name + L"\nСейчас: " + tbuf + (w.is_day ? L" (день)" : L" (ночь)");
                     SetDlgItemTextW(hDlg, IDC_STATIC_STATUS, ok_msg.c_str());
                 }
                 else
@@ -272,6 +509,8 @@ IPluginItem* CWeatherRUPlugin::GetItem(int index)
 {
     if (index == 0)
         return &m_item;
+    if (index == 1)
+        return &m_icon_item;
     return nullptr;
 }
 
@@ -336,6 +575,8 @@ void CWeatherRUPlugin::WorkerLoop()
         {
             m_has_temp = true;
             m_last_temp = res.temperature_c;
+            m_last_wmo = res.weather_code;
+            m_last_is_day = res.is_day;
             m_last_error.clear();
 
             SYSTEMTIME st{};
@@ -391,12 +632,22 @@ void CWeatherRUPlugin::DataRequired()
     StartWorkerIfNeeded();
 
     wchar_t display[32] = L"-- °C";
+    int wmo = 0;
+    bool is_day = true;
+    bool has_data = false;
+
     EnterCriticalSection(&m_cs);
     if (m_has_temp)
+    {
+        has_data = true;
+        wmo = m_last_wmo;
+        is_day = m_last_is_day;
         FormatTemperature(m_last_temp, m_config.show_plus, m_config.round_temp, display, 32);
+    }
     LeaveCriticalSection(&m_cs);
 
     m_item.SetValueText(display);
+    m_icon_item.SetWeatherState(wmo, is_day, has_data);
 }
 
 ITMPlugin::OptionReturn CWeatherRUPlugin::ShowOptionsDialog(void* hParent)
@@ -464,7 +715,7 @@ const wchar_t* CWeatherRUPlugin::GetInfo(PluginInfoIndex index)
     switch (index)
     {
     case TMI_NAME:        return L"Погода РФ (WeatherRU)";
-    case TMI_DESCRIPTION: return L"Отображает актуальную температуру для городов России через Open-Meteo (без API-ключа).";
+    case TMI_DESCRIPTION: return L"Отображает актуальную температуру и динамическую иконку погоды для городов России через Open-Meteo.";
     case TMI_AUTHOR:      return L"Custom Plugin";
     case TMI_COPYRIGHT:   return L"MIT License";
     case TMI_VERSION:     return L"1.0.0";
