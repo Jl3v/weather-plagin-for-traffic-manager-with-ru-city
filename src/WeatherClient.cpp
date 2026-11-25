@@ -429,13 +429,16 @@ WeatherResult FetchCurrentTemperature(double lat, double lon)
 {
     WeatherResult res;
 
-    // Format coordinates with dot regardless of locale
-    char buf[160];
-    std::snprintf(buf, sizeof(buf),
-                  "/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m&timezone=auto",
-                  lat, lon);
-    std::string path_utf8(buf);
-    std::replace(path_utf8.begin(), path_utf8.end(), ',', '.');
+    char lat_buf[32], lon_buf[32];
+    std::snprintf(lat_buf, sizeof(lat_buf), "%.4f", lat);
+    std::snprintf(lon_buf, sizeof(lon_buf), "%.4f", lon);
+
+    std::string lat_s(lat_buf), lon_s(lon_buf);
+    std::replace(lat_s.begin(), lat_s.end(), ',', '.');
+    std::replace(lon_s.begin(), lon_s.end(), ',', '.');
+
+    std::string path_utf8 = "/v1/forecast?latitude=" + lat_s + "&longitude=" + lon_s +
+                            "&current=temperature_2m,weather_code,is_day&timezone=auto";
 
     std::string body;
     if (!HttpGetHttps(L"api.open-meteo.com", Utf8ToWide(path_utf8), body, res.error))
@@ -443,7 +446,6 @@ WeatherResult FetchCurrentTemperature(double lat, double lon)
         return res;
     }
 
-    // Locate "current":{...} (not "current_units")
     size_t cur_pos = body.find("\"current\":{");
     if (cur_pos == std::string::npos)
     {
@@ -461,6 +463,14 @@ WeatherResult FetchCurrentTemperature(double lat, double lon)
         res.error = L"Не удалось прочитать температуру";
         return res;
     }
+
+    double wmo = 0.0;
+    if (ExtractJsonNumber(sub, "weather_code", wmo))
+        res.weather_code = static_cast<int>(wmo + 0.5);
+
+    double day_flag = 1.0;
+    if (ExtractJsonNumber(sub, "is_day", day_flag))
+        res.is_day = (day_flag > 0.5);
 
     res.ok = true;
     return res;
