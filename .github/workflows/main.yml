@@ -20,15 +20,12 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Sync official TrafficMonitor PluginInterface.h
+      - name: Download official TrafficMonitor PluginInterface.h
         shell: pwsh
         run: |
-          try {
-            Invoke-WebRequest -Uri "https://raw.githubusercontent.com/zhongyang219/TrafficMonitor/master/TrafficMonitor/PluginInterface.h" -OutFile "include/PluginInterface.h" -UseBasicParsing
-            Write-Host "Downloaded official PluginInterface.h"
-          } catch {
-            Write-Host "Using bundled fallback PluginInterface.h"
-          }
+          $ErrorActionPreference = "Stop"
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/zhongyang219/TrafficMonitor/master/include/PluginInterface.h" -OutFile "include/PluginInterface.h" -UseBasicParsing
+          Write-Host "Downloaded official include/PluginInterface.h"
 
       - name: Configure CMake (${{ matrix.arch }})
         run: cmake -B build -A ${{ matrix.cmake_arch }}
