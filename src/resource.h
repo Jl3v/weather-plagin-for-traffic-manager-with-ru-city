@@ -1,5 +1,7 @@
 #pragma once
-
+#ifndef IDC_STATIC
+#define IDC_STATIC (-1)
+#endif
 #define IDD_OPTIONS_DIALOG          101
 #define IDC_COMBO_CITY              1001
 #define IDC_COMBO_INTERVAL          1002
