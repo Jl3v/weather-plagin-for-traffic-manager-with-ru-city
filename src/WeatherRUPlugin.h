@@ -1,12 +1,7 @@
 #pragma once
 
 #include "PluginInterface.h"
-#include <atomic>
-#include <chrono>
-#include <condition_variable>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <windows.h>
 
 struct PluginConfig
@@ -28,10 +23,10 @@ public:
     virtual const wchar_t* GetItemValueText() const override;
     virtual const wchar_t* GetItemValueSampleText() const override;
 
-    void SetValueText(const std::wstring& text);
+    void SetValueText(const wchar_t* text);
 
 private:
-    std::wstring m_value_text = L"-- °C";
+    wchar_t m_value_buf[32] = L"-- °C";
 };
 
 class CWeatherRUPlugin : public ITMPlugin
@@ -59,29 +54,29 @@ private:
 
     void StartWorkerIfNeeded();
     void StopWorker();
+    static DWORD WINAPI WorkerThreadProc(LPVOID param);
     void WorkerLoop();
 
     void LoadConfig();
     void SaveConfig();
+    std::wstring GetModuleDir() const;
     std::wstring GetConfigFilePath() const;
-    std::wstring FormatTemperature(double temp_c, bool show_plus, bool round_temp) const;
+    void FormatTemperature(double temp_c, bool show_plus, bool round_temp, wchar_t* out, size_t out_len) const;
 
     CWeatherRUItem m_item;
     std::wstring m_config_dir;
 
-    std::mutex m_mutex;
+    mutable CRITICAL_SECTION m_cs;
     PluginConfig m_config;
     bool m_has_temp = false;
     double m_last_temp = 0.0;
     std::wstring m_last_update_str = L"ещё не обновлялось";
     std::wstring m_last_error;
 
-    std::thread m_worker;
-    std::condition_variable m_cv;
+    HANDLE m_thread = nullptr;
+    HANDLE m_stop_event = nullptr;
+    HANDLE m_wake_event = nullptr;
     bool m_worker_started = false;
-    bool m_stop = false;
-    bool m_force_refresh = true;
-    std::chrono::steady_clock::time_point m_next_fetch_time{};
 
     static HMODULE s_hModule;
 };
